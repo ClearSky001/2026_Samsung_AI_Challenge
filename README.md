@@ -1,5 +1,148 @@
 # 2026 Samsung AI Challenge – AI Agent Harness
 
+**English** | [한국어](#한국어)
+
+## Project Overview & Key Results
+This repository shares the code of a **rule-based AI Agent Harness** that I designed and built for the [2026 Samsung Collegiate Programming Challenge: AI Challenge](https://dacon.io/competitions/official/236730/overview/description). The harness interprets the context of requests that an on-device personal agent receives, and produces its decision and execution plan as an answer in a fixed format.
+
+- `harness.py` builds a structured answer through a single call, `FinalHarness.answer_task(task, session)`, by interpreting the task's `prompt`, `device_state` (objects · records), `visible_history`, `personal_memory`, and the session state. It is a deterministic implementation that uses **only the Python standard library**, with no external LLM/API.
+- `run_submission.py` sorts the task JSONL by `(session_id, turn_index, task_id)`, runs the harness while keeping per-session state, validates the answer structure, and writes `submission.csv`.
+- `evaluate_dev.py` is a regression check script for the public dev data. (It needs the local scoring code provided by the competition, which is not included in this repository.)
+
+### Final Results
+Raised the leaderboard score (overall) from **0.41 → 0.8891**, ranking **46th out of 1,843 participants (top 3%)**.
+
+<p align="center">
+  <img src="assets/leaderboard_score_en.png" width="380" alt="Leaderboard score change"/>
+</p>
+
+---
+
+## Task Overview
+- **Topic**: Creative problem solving through AI Agent Harness design (Host: Samsung Electronics / Organizer: Samsung Research / Operator: DACON)
+- **Input (task JSON)**: `prompt`, `device_state` (`objects`, `records`), `visible_history`, `personal_memory`
+- **Output (answer JSON)**: `focal_id`, `target`, `control` (`proceed | amend | hold | ask`), `content_scope`, `policy`, `plan_events`
+- **Evaluation**: Overall score computed by comparing the answers for the 700 Public Screening tasks with the ground truth stored on the server
+- **Constraints**: Only the fixed SLM interface provided by the competition (`FixedSLMClient`) may be used; external LLM APIs, network calls, and hard-coding for specific tasks are not allowed. So performance differences come from **harness design**, not from the model.
+
+---
+
+## Repository Structure
+```
+2026_Samsung_AI_Challenge/
+├── harness.py            # FixedSLMClient facade + FinalHarness (rule-based agent harness)
+├── run_submission.py     # Run task JSONL → validate answer structure → write submission.csv
+├── evaluate_dev.py       # Regression check on dev data (needs the competition-provided local scoring code)
+├── requirements.txt      # No external dependencies (standard library only)
+├── assets/               # Diagrams for the README
+├── .gitignore / LICENSE
+└── README.md
+```
+
+---
+
+## Tech Stack
+- **Language**: Python 3.10+ (environment used to create and validate the submission: Python 3.12.13)
+- **Modules used**: Standard library modules such as `re`, `json`, `csv`, `argparse`, `pathlib`, and `typing`
+- **External models/APIs**: None (only the competition-provided `FixedSLMClient` local facade)
+- **Reproducibility**: Deterministic execution with no randomness or sampling (same input → same `submission.csv`)
+
+---
+
+## Dataset
+The competition data (`dev_tasks.jsonl` with 120 tasks, `dev_answers.json`, `screening_tasks.jsonl` with 700 tasks, `submission_schema.json`, the baseline notebook, etc.) cannot be redistributed under the competition rules, so it is **not included in this repository.** Download it from the Data tab of the [competition page](https://dacon.io/competitions/official/236730/overview/description).
+
+> **Note:** This repository is maintained **for sharing code**. To run it, prepare the competition data locally and pass the paths as arguments.
+
+---
+
+## Harness Architecture and Flow
+
+<p align="center">
+  <img src="assets/harness_architecture_en.png" alt="AI Agent Harness architecture and flow"/>
+</p>
+
+1. **Context parsing**
+   - Summarizes the task's supporting evidence (risk flags, audit tags, etc.) with `FixedSLMClient.summarize_task()`. This result is used only for the answer's `audit_tags`; all other structured fields are built directly by the harness rules.
+   - Converts `device_state.records` into a `type → value` Record Map to read sharing policies, permission checks, and safety/security signals.
+2. **Focal resolution (`choose_focal`)**
+   - ① The marker chain (`focal_marker_refs` → `focal_resolution_trace` → `route_binding_order`)
+   - ② Designating expressions ("기준 참조는 …" / "the reference is …", "…로 고정" / "fixed to …") and ordinal expressions ("두 번째 후보만" / "only the second candidate", "가운데 항목만" / "only the middle item") in `visible_history`
+   - ③ Object ids that record values point to directly → ④ token overlap with the prompt; the focal object is decided by checking these in this order.
+3. **Control decision (priority cascade)**
+   - Classifies the latest correction clause of the form "단, …" ("However, …") into one of four meanings: **stop / ask the user / process locally / summary only**.
+   - Then picks one of `proceed | amend | hold | ask`, checking in this order: safety · security · consent → memory conflict · target change → authority → ambiguity → sharing policy.
+4. **Answer construction**
+   - `infer_target`: Decides the final target, such as the recipient, channel, device, or memory store
+   - `build_content_scope`: Disclosure scope (mode), allowed/excluded fields, and whether user confirmation is needed
+   - `build_policy`: risk flags, violations, confirmation
+   - `build_plan_events`: Plan steps — read / guard / clarify / redact / summarize / dispatch / verify / update
+5. **Session Memory**
+   - Stores the user profile from `persistent_memory_write` records, then in later turns looks it up for `persistent_memory_recall` by `memory_key` → person, and reflects it in the target and control decisions.
+
+---
+
+## Improvement Process
+| Stage | Leaderboard overall | Notes |
+|------|-----------------:|------|
+| Initial submission | 0.41 | First submission |
+| Rules fitted to dev answers | 0.63 | Perfect local score (0.96) on the 120 dev tasks, but it did not generalize on the leaderboard |
+| Redesign for generalization (final) | **0.8891** | Decisions based on structured records and meaning-level classification instead of memorized sentences |
+
+- **Overfitting diagnosis**: The local scorer is gated: if the focal is wrong, every other field scores 0, and if the target or control is wrong, content_scope, policy, and plan score 0. Rules fitted to the dev example sentences lost all downstream points as soon as an earlier stage was wrong.
+- **Redesign direction**
+  - Classify the meaning of correction clauses (stop · confirm · local · summary only) by keyword combinations instead of memorizing them sentence by sentence
+  - Turn focal resolution into general rules based on the marker chain and history expressions (designating · ordinal)
+  - Treat record values with the same meaning as one (e.g., both `internal_binding_confirmed` and `local_authority_confirmed` mean "authority confirmed")
+  - When a record value holds only an identifier, parse the user profile from the prompt and store it in session memory
+
+---
+
+## Usage
+1. **Environment setup**
+   ```bash
+   python --version   # 3.10 or higher
+   ```
+   No extra packages need to be installed.
+2. **Prepare the data**
+   - Download `screening_tasks.jsonl` (required) and `dev_tasks.jsonl` · `dev_answers.json` (optional) from the competition Data tab.
+3. **Create the submission file**
+   ```bash
+   python run_submission.py /path/to/screening_tasks.jsonl -o submission.csv
+   ```
+   On success it prints `wrote submission.csv (700 answers)`. Before saving, it checks that task IDs match, that the focal object exists, required fields and enums, scope/policy types, and the plan event structure.
+4. **Dev regression check (optional)**
+   ```bash
+   python evaluate_dev.py /path/to/dev_tasks.jsonl /path/to/dev_answers.json
+   ```
+   To run it, save the local scoring code from the competition baseline notebook as `scoring.py` in the same folder.
+5. **Call it directly from code**
+   ```python
+   from harness import FinalHarness
+
+   harness = FinalHarness()
+   session = {}
+   answer = harness.answer_task(task, session)
+   ```
+
+---
+
+## Reproducibility Check
+- **Possible**: With the competition data (`screening_tasks.jsonl`, etc.) prepared locally and its path passed as an argument, you can create the submission file and validate its structure.
+- **Not possible**: It cannot run without the data. The dev regression check also needs the competition-provided local scoring code. (The repository is for sharing code.)
+
+---
+
+## Key Results
+- **Leaderboard overall**: `0.8891` (700 Public Screening tasks)
+- **Rank**: 46th out of 1,843 (top 3%)
+- **Dev regression check**: local score `0.9600` — the local scorer does not score the semantic response axis (0.04), so 0.96 is the maximum.
+- **Implementation**: No external model, API, or network calls / no answer mapping by task_id or session_id / deterministic execution
+
+---
+
+# 한국어
+
 ## 프로젝트 소개 & 주요 성과
 [2026 Samsung Collegiate Programming Challenge : AI 챌린지](https://dacon.io/competitions/official/236730/overview/description)에 참가하여, 개인 기기 Agent가 마주치는 요청 맥락을 해석하고 판단과 실행 계획을 정해진 형식의 답안으로 생성하는 **규칙 기반 AI Agent Harness**를 설계·구현한 코드를 공유합니다.
 
